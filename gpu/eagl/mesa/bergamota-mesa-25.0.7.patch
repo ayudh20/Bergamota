@@ -921,6 +921,21 @@ index 0000000..276b496
 +         refused_add(surface_id | 0x40000000u);
 +         goto out;
 +      }
++      /* Validate that the image extent fits within the BO size.
++       * Kernel allocates height * stride (elementHeight == 1 enforced).
++       * GPU accesses up to (height-1)*stride + width*bpp <= height*stride.
++       */
++      {
++         uint64_t extent = (uint64_t)sb.offset + (uint64_t)h * sb.bytes_per_row;
++         if (extent > sb.size) {
++            if (getenv("SWEET_GPU_DEBUG"))
++               fprintf(stderr, "OSMesa/sweet: surface %u geometry (%ux%u) extent %llu exceeds BO size %llu\n", surface_id, w, h, extent, sb.size);
++            if (r == 0 && sb.handle)
++               sweet_drm_gem_close(g_fd, sb.handle);
++            refused_add(surface_id | 0x40000000u);
++            goto out;
++         }
++      }
 +      struct pipe_resource templ;
 +      memset(&templ, 0, sizeof(templ));
 +      templ.target = PIPE_TEXTURE_2D;

@@ -108,6 +108,11 @@ index edfb7210657e138f26d8fa4558844817b6352f32..2fc64a81e78517129dee29c5f7d83119
  		IOLog("SWEET GPU: no GPU address space for %llu bytes\n", size);
  		return kIOReturnNoSpace;
  	}
++	IOReturn prep = slot->md->prepare();
++	if (prep != kIOReturnSuccess) {
++		sweet_gpu_iova_free(iova, taken);
++		return prep;
++	}
 @@ -454,6 +510,9 @@ SweetAdrenoUserClient::mapGem(struct sweet_gem *slot, uint32_t flags, uint32_t *
  		addr64_t pa = slot->md->getPhysicalSegment(mapped, &length, kIOMemoryMapperNone);
  		ok = pa != 0 && (pa & (GPU_PAGE - 1)) == 0 && sweet_gpu_vm_map(iova + mapped, pa, ro);
@@ -118,6 +123,9 @@ index edfb7210657e138f26d8fa4558844817b6352f32..2fc64a81e78517129dee29c5f7d83119
  	sweet_gpu_vm_flush();
  	if (!ok) {
  		sweet_gpu_vm_unmap(iova, mapped);
++		sweet_gpu_iova_free(iova, taken);
++		slot->md->complete();
++		return kIOReturnNoMemory;
 @@ -463,6 +522,7 @@ SweetAdrenoUserClient::mapGem(struct sweet_gem *slot, uint32_t flags, uint32_t *
  	}
  	slot->iova = iova;
@@ -126,6 +134,49 @@ index edfb7210657e138f26d8fa4558844817b6352f32..2fc64a81e78517129dee29c5f7d83119
  	slot->flags = flags;
  	*handle = (uint32_t)(slot - fGems) + 1;
  	return kIOReturnSuccess;
++@@ -580,28 +643,40 @@ SweetAdrenoUserClient::gemInfo(struct sweet_msm_gem_info *r)
++ 			case SWEET_MSM_INFO_SET_IOVA:
++ 				if (g->submitted || r->value == g->iova) {
++ 					ret = r->value == g->iova ? kIOReturnSuccess : kIOReturnNotPermitted;
++ 				} else if (!sweet_gpu_iova_reserve(r->value, g->size + g->tail)) {
++ 					ret = kIOReturnNoSpace;
++ 				} else {
++ 					/* move: map at the new place first, then drop the old range */
++ 					uint64_t old = g->iova, oldLen = g->vaLen, newIova = r->value;
++ 					bool ok = true;
++ 					uint64_t mapped = 0;
++-					for (; mapped < g->size && ok; mapped += PAGE_SIZE) {
+++					for (; mapped < g->size && ok; mapped += GPU_PAGE) {
++ 						IOByteCount length = 0;
++ 						addr64_t pa = g->md->getPhysicalSegment(mapped, &length, kIOMemoryMapperNone);
++ 						ok = pa != 0 && (pa & (GPU_PAGE - 1)) == 0 && sweet_gpu_vm_map(newIova + mapped, pa, (g->flags & SWEET_MSM_BO_GPU_READONLY) != 0);
++ 					}
+++					/* Map the tail from gScratchPA */
+++					if (ok && g->tail != 0) {
+++						if (gScratchPA == 0 || (gScratchPA & (GPU_PAGE - 1)) != 0) {
+++							ok = false;
+++						}
+++					}
+++					for (uint64_t t = 0; t < g->tail && ok; t += GPU_PAGE, mapped += GPU_PAGE) {
+++						ok = sweet_gpu_vm_map(newIova + g->size + t, gScratchPA, false);
+++					}
++ 					if (!ok) {
++-					sweet_gpu_vm_unmap(newIova, mapped);
++-					sweet_gpu_iova_free(newIova, g->size);
+++						sweet_gpu_vm_unmap(newIova, mapped);
+++						sweet_gpu_iova_free(newIova, g->size + g->tail);
++ 						ret = kIOReturnNoMemory;
++ 					} else {
++-					sweet_gpu_vm_unmap(old, g->size);
++-					sweet_gpu_iova_free(old, oldLen);
+++						sweet_gpu_vm_unmap(old, g->size + g->tail);
+++						sweet_gpu_iova_free(old, oldLen);
++ 						g->iova = newIova;
++-					g->vaLen = g->size;
+++						g->vaLen = g->size + g->tail;
++ 					}
++ 				}
++ 				break;
 @@ -990,6 +1050,7 @@ SweetAdrenoUserClient::surfaceBo(struct sweet_gpu_surface_bo *r)
  		s->release();
  		return kIOReturnBadArgument;

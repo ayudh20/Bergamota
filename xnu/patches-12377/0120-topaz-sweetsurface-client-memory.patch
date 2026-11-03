@@ -107,9 +107,15 @@ index b509fd7def8e513baedaf0d2ec2bb6b13bc47bc2..1a34a67fecfe95493c70295c5c94547c
 +		}
 +		uint64_t owned = sweet_dict_u32(props, "IOSurfaceAllocSize", 0);
 +		if (owned != 0) {
-+			used = owned;
++			if (owned < used) {
++				ret = kIOReturnBadArgument;
++			} else {
++				used = owned;
++			}
 +		}
-+		ret = sweet_surface_use_task_memory(s, fTask, client_address->unsigned64BitValue(), used);
++		if (ret == kIOReturnSuccess) {
++			ret = sweet_surface_use_task_memory(s, fTask, client_address->unsigned64BitValue(), used);
++		}
 +		if (ret == kIOReturnSuccess && !sweet_surface_publish(s)) {
 +			ret = kIOReturnNoResources;
 +		}
