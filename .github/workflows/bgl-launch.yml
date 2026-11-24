@@ -1,0 +1,27 @@
+name: bgl-launch (Chlorophyll backboardd launcher)
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: runner label
+        default: macos-15-intel
+
+jobs:
+  build:
+    runs-on: ${{ inputs.runner || 'macos-15-intel' }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build (same command as gpu/eagl/make-payload.sh)
+        run: |
+          SDK="$(xcrun --sdk iphoneos --show-sdk-path)"
+          mkdir -p out
+          xcrun --sdk iphoneos clang -arch arm64e -miphoneos-version-min=18.0 -isysroot "$SDK" -O2 -Wall -Wextra \
+            gpu/eagl/launch/bgl-launch.c -o out/bgl-launch
+          file out/bgl-launch
+          shasum -a 256 out/bgl-launch | tee out/bgl-launch.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bgl-launch
+          path: out/
