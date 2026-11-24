@@ -3,7 +3,7 @@ name: sweetscdump (read-only network config dump)
 on:
   push:
     branches: [chlorophyll]
-    paths: ['.github/workflows/sweetscdump.yml', 'tools/sweetnet/sweetscdump.c']
+    paths: ['.github/workflows/sweetscdump.yml', 'tools/sweetnet/sweetscdump.c', 'tools/sweetnet/sweetnetcfg.c']
   workflow_dispatch:
 
 jobs:
@@ -15,11 +15,13 @@ jobs:
       - name: Build (as tools/sweetnet/build.sh builds sweetnetcfg)
         run: |
           mkdir -p out
-          xcrun -sdk iphoneos clang -arch arm64 -mios-version-min=16.0 -O2 -Wall \
-            -framework CoreFoundation tools/sweetnet/sweetscdump.c -o out/sweetscdump
-          codesign -s - -f --entitlements tools/sweetnet/entitlements.plist out/sweetscdump
-          file out/sweetscdump
-          shasum -a 256 out/sweetscdump | tee out/sweetscdump.sha256
+          for t in sweetscdump sweetnetcfg; do
+            xcrun -sdk iphoneos clang -arch arm64 -mios-version-min=16.0 -O2 -Wall -Werror \
+              -framework CoreFoundation tools/sweetnet/$t.c -o out/$t
+            codesign -s - -f --entitlements tools/sweetnet/entitlements.plist out/$t
+          done
+          file out/*
+          (cd out && shasum -a 256 sweetscdump sweetnetcfg | tee SHA256SUMS)
       - uses: actions/upload-artifact@v4
         with:
           name: sweetscdump
