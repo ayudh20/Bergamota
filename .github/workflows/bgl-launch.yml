@@ -1,6 +1,9 @@
 name: bgl-launch (Chlorophyll backboardd launcher)
 
 on:
+  push:
+    branches: [chlorophyll]
+    paths: ['.github/workflows/bgl-launch.yml', 'gpu/eagl/launch/**']
   workflow_dispatch:
     inputs:
       runner:
