@@ -18,6 +18,9 @@ on:
       keep_going:
         description: make -k (collect all compile errors in one run)
         default: "true"
+      runner:
+        description: runner label override (empty = macos-15 / macos-14 by macos_version; e.g. macos-15-intel when arm64 runners are out of capacity)
+        default: ""
   push:
     branches: [main, develop, xnu11215]
     paths:
@@ -55,7 +58,7 @@ jobs:
     # 13.x/14.x sources: macos-14 still ships Xcode 15.x, whose iig matches the xnu-8796 IORPC ABI
     # (Xcode 16's iig emits IORPC.kernelContent, which that xnu lacks).
     # 15.x sources (xnu-11215): macos-15 with Xcode 16.2 (the macOS 15.2/15.3 era toolchain).
-    runs-on: ${{ startsWith(inputs.macos_version || (github.ref_name == 'main' && '13.5' || '15.3'), '15.') && 'macos-15' || 'macos-14' }}
+    runs-on: ${{ inputs.runner || startsWith(inputs.macos_version || (github.ref_name == 'main' && '13.5' || '15.3'), '15.') && 'macos-15' || 'macos-14' }}
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
