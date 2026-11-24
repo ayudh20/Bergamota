@@ -1,0 +1,39 @@
+From: ayudh20 <ayudh20@users.noreply.github.com>
+Subject: [PATCH] beryllium: keys: Volume Up as the side button (sweetvolpower=1)
+
+For a phone whose power key is broken: with boot-arg sweetvolpower=1, key 1 (Volume Up, PM8998
+GPIO) is delivered to iOS as kHIDUsage_Csmr_Power instead of VolumeIncrement, so it locks and wakes
+the screen like the side button (and a long hold brings up the slide-to-power-off screen). The
+volume keys have no function on this port (no audio). Default 0: nothing changes. Volume Down keeps
+its meaning (and the PMIC stage-2 reset Enxerto programs on it).
+
+---
+ iokit/Kernel/arm/hid/SweetHID.cpp | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp
+@@ -500,12 +500,22 @@
+ /* key: 0 power (side button), 1 volume up, 2 volume down, 3 home */
+ extern "C" void
+ sweet_hid_key(int key, int down)
+ {
+ 	static const UInt32 usages[] = {
+ 		kHIDUsage_Csmr_Power, kHIDUsage_Csmr_VolumeIncrement,
+ 		kHIDUsage_Csmr_VolumeDecrement, kHIDUsage_Csmr_Menu,
+ 	};
++	static int volpower = -1;       /* sweetvolpower=1: Volume Up acts as the side button */
+
++	if (key == 1) {
++		if (volpower < 0) {
++			int v = 0;
++			(void)PE_parse_boot_argn("sweetvolpower", &v, sizeof(v));
++			volpower = v != 0;
++			IOLog("SWEET HID: sweetvolpower=%d: Volume Up is %s\n", volpower, volpower ? "the side button" : "volume up");
++		}
++		key = volpower ? 0 : 1;
++	}
+ 	if (gSweetButtons && key >= 0 && key < (int)(sizeof(usages) / sizeof(usages[0]))) {
+ 		gSweetButtons->key(usages[key], down != 0);
+ 	}
