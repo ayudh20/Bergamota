@@ -1,0 +1,121 @@
+diff --git a/bsd/dev/sweet_reboot.c b/bsd/dev/sweet_reboot.c
+index 8228f52..6f9a8a9 100644
+--- a/bsd/dev/sweet_reboot.c
++++ b/bsd/dev/sweet_reboot.c
+@@ -62,6 +62,11 @@ extern int sweet_ufs_flush_final(void);      /* bsd/dev/sweet_ufs.c: SYNCHRONIZE
+ #define SR_PON_SPARE     0x088fu           /* PON base 0x800 + PON_SOFT_RB_SPARE 0x8f */
+ #define SR_REASON_SHIFT  1u                /* qcom,pm8998-pon: GEN2_REASON_SHIFT */
+ #define SR_REASON_MASK   (0xffu & ~((1u << SR_REASON_SHIFT) - 1u))   /* GENMASK(7, 1) */
++/* PM8998 PON PS_HOLD reset config (qpnp-power-on: QPNP_PON_PS_HOLD_RST_CTL/CTL2, gen2 types) */
++#define SR_PON_PSHOLD_CTL   0x085au
++#define SR_PON_PSHOLD_CTL2  0x085bu
++#define SR_PON_RESET_EN     0x80u
++#define SR_PON_TYPE_SHUTDOWN 0x04u
+ #define SR_MAGIC_NORMAL     0u
+ #define SR_MAGIC_RECOVERY   0x1u           /* pm8998.dtsi mode-recovery */
+ #define SR_MAGIC_BOOTLOADER 0x2u           /* pm8998.dtsi mode-bootloader */
+@@ -253,4 +258,67 @@ sweet_reboot_restart(int panic_restart)
+ 	delay(2000 * 1000);
+ 	return -1;
+ }
++
++/* PSCI SYSTEM_OFF (SMCCC 1.0): fallback when the PMIC shutdown does not take. */
++static void
++sr_psci_system_off(void)
++{
++	register uint64_t x0 __asm__("x0") = 0x84000008ULL;
++	__asm__ volatile ("smc #0" : "+r"(x0) : : "x1", "x2", "x3", "x4", "x5", "x6", "x7",
++	    "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "cc", "memory");
++}
++
++/*
++ * Power off (0253). Until this, kPEHaltCPU ("Shut Down") just spun with the
++ * panel and backlight on. Same as downstream qpnp_pon_system_pwr_off(): PS_HOLD
++ * reset type = SHUTDOWN on PM8998 (CTL2 enable off, >= 3 sleep clocks, type,
++ * enable on), PON reason normal, then drop PS_HOLD. PSCI SYSTEM_OFF follows if
++ * still alive. Boot-arg sweetpoweroff=0 restores the old spin.
++ * Powering on again without a power key: plug in USB (with the cable already
++ * plugged, the PMIC powers straight back on and the phone boots again).
++ */
++int
++sweet_reboot_poweroff(void);
++int
++sweet_reboot_poweroff(void)
++{
++	int en = 1;
++	uint8_t v, back = 0xff, back2 = 0xff;
++
++	(void)PE_parse_boot_argn("sweetpoweroff", &en, sizeof(en));
++	int flush = sweet_ufs_flush_final();
++	printf("SWEET REBOOT: power off requested (sweetpoweroff=%d), UFS cache flush -> %d\n", en, flush);
++	if (!en || !sr_ready || sr_in_panic) {
++		return -1;
++	}
++	sweet_spmi_atomic();
++	sr_pon_set_reason(SR_MAGIC_NORMAL);
++	if (sr_imem) {
++		sr_imem[SR_IMEM_RESTART / 4] = 0;
++		__asm__ volatile ("dsb sy" ::: "memory");
++	}
++	if (sr_pon_ready) {
++		v = 0;
++		(void)sweet_spmi_write(SR_PON_SID, SR_PON_PSHOLD_CTL2, &v, 1);
++		delay(200);
++		v = SR_PON_TYPE_SHUTDOWN;
++		(void)sweet_spmi_write(SR_PON_SID, SR_PON_PSHOLD_CTL, &v, 1);
++		v = SR_PON_RESET_EN;
++		(void)sweet_spmi_write(SR_PON_SID, SR_PON_PSHOLD_CTL2, &v, 1);
++		(void)sweet_spmi_read(SR_PON_SID, SR_PON_PSHOLD_CTL, &back);
++		(void)sweet_spmi_read(SR_PON_SID, SR_PON_PSHOLD_CTL2, &back2);
++		printf("SWEET REBOOT: PS_HOLD reset ctl 0x%02x ctl2 0x%02x, dropping PS_HOLD\n", back, back2);
++	}
++	if (back == SR_PON_TYPE_SHUTDOWN && (back2 & SR_PON_RESET_EN)) {
++		__asm__ volatile ("dsb sy" ::: "memory");
++		*sr_pshold = 0;
++		__asm__ volatile ("dsb sy" ::: "memory");
++		delay(2000 * 1000);
++	}
++	printf("SWEET REBOOT: still on, PSCI SYSTEM_OFF\n");
++	sr_psci_system_off();
++	delay(2000 * 1000);
++	printf("SWEET REBOOT: power off failed\n");
++	return -1;
++}
+ #endif /* ARM64_BOARD_CONFIG_SWEET */
+diff --git a/bsd/dev/sweet_spmi.c b/bsd/dev/sweet_spmi.c
+index d5851dc..8b022be 100644
+--- a/bsd/dev/sweet_spmi.c
++++ b/bsd/dev/sweet_spmi.c
+@@ -249,7 +249,9 @@ sp_write_allowed(unsigned sid, unsigned addr, unsigned len)
+ 	}
+ 	if (sid == 0) {
+ 		/* PON spare (reboot reason); RTC alarm data 0x6140-0x6143 (the RTC offset, sweet_rtc_set) */
+-		return (addr == 0x088fu && len == 1) || (addr >= 0x6140u && addr + len <= 0x6144u);
++		/* 0x085a/0x085b: PON_PS_HOLD_RESET_CTL/CTL2, shutdown type for power off (0253, sweet_reboot_poweroff) */
++		return ((addr == 0x088fu || addr == 0x085au || addr == 0x085bu) && len == 1) ||
++		    (addr >= 0x6140u && addr + len <= 0x6144u);
+ 	}
+ 	if (sid != 3) {
+ 		return false;
+diff --git a/iokit/Kernel/arm/SweetPlatformExpert.cpp b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+index c6d113f..68b620b 100644
+--- a/iokit/Kernel/arm/SweetPlatformExpert.cpp
++++ b/iokit/Kernel/arm/SweetPlatformExpert.cpp
+@@ -12,6 +12,7 @@
+ 
+ extern "C" int sweet_reboot_restart(int panic_restart);
+ extern "C" void sweet_reboot_note_panic(void);
++extern "C" int sweet_reboot_poweroff(void);
+ #include "../../../bsd/dev/sweet_board.h"
+ #include "../../../bsd/dev/sweet_spmi.h"
+ 
+@@ -67,6 +68,9 @@ SweetPlatformExpert::haltRestart(unsigned int type)
+ 	case kPERestartCPU:
+ 		(void)sweet_reboot_restart(0);
+ 		break;
++	case kPEHaltCPU:
++		(void)sweet_reboot_poweroff();     /* 0253: real power off (PMIC shutdown) */
++		break;
+ 	default:
+ 		break;
+ 	}
