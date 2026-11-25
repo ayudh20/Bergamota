@@ -1,0 +1,149 @@
+From: ayudh20 <ayudh20@users.noreply.github.com>
+Subject: [PATCH] beryllium: fb/hid: WLED module off with the display, tap to wake
+
+sweetfb_blmod=1: with the display off, also clear WLED MOD_EN (as qcom-wled does at
+brightness 0); this LCD still glows faintly at brightness 0 with the module on.
+sweettapwake=1: while iOS has the display off, a touch becomes a side-button press
+and is swallowed until the finger lifts. Both default off.
+
+---
+ bsd/dev/sweet_spmi.c                  |  1 +
+ iokit/Kernel/arm/SweetFramebuffer.cpp | 38 +++++++++++++++++++++++++++++++++++
+ iokit/Kernel/arm/hid/SweetHID.cpp     | 32 +++++++++++++++++++++++++++++
+ 3 files changed, 71 insertions(+)
+
+diff --git a/bsd/dev/sweet_spmi.c b/bsd/dev/sweet_spmi.c
+index 362a89b..d5851dc 100644
+--- a/bsd/dev/sweet_spmi.c
++++ b/bsd/dev/sweet_spmi.c
+@@ -255,6 +255,7 @@ sp_write_allowed(unsigned sid, unsigned addr, unsigned len)
+ 		return false;
+ 	}
+ 	switch (addr) {
++	case 0xd846u:   /* WLED MOD_EN (0252, sweetfb_blmod=1): the module off with the display */
+ 	case 0xd947u:
+ 	case 0xd958u:
+ 	case 0xd968u:
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 1a16f3f..b8566f4 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -49,6 +49,7 @@ extern "C" void sweet_busy_init(void);          /* iokit/Kernel/arm/SweetBusy.cp
+ extern "C" int sweet_smmu_probe_sid(unsigned sid, unsigned level); /* bsd/dev/sweet_smmu.c, read only */
+ extern "C" void sweet_fb_stats_publish(const char *text);       /* bsd/dev/sweet_fb.c: sysctl kern.sweet_fb */
+ extern "C" int sweet_fb_hud;
++extern "C" volatile int sweet_fb_screen_off;    /* iokit/Kernel/arm/hid/SweetHID.cpp (0252): iOS turned the display off */
+ extern "C" uint32_t sweet_gpu_fence_snapshot(void);     /* bsd/dev/sweet_a630.c (0229) */
+ extern "C" bool sweet_gpu_blit_window(uint64_t pa, uint64_t size);      /* bsd/dev/sweet_a630.c (0240) */
+ extern "C" uint32_t sweet_gpu_blit(uint64_t src_pa, uint32_t src_pitch, uint64_t dst_pa, uint32_t dst_pitch, uint32_t w, uint32_t h);
+@@ -2505,6 +2506,37 @@ sweet_wled_read16(unsigned string, uint16_t *out)
+ 	return 0;
+ }
+ 
++/*
++ * 0252: with boot-arg sweetfb_blmod=1 the WLED module itself (MOD_EN bit 7) goes off with the display and on again
++ * before the brightness is restored, as Linux's qcom-wled does at brightness 0: on this LCD a zero brightness with the
++ * module enabled still leaks a faint glow. Read-modify-write, read back. Default off.
++ */
++static int sweet_fb_blmod = -1;
++
++static bool
++sweet_wled_module(bool on)
++{
++	if (sweet_fb_blmod < 0) {
++		int v = 0;
++		(void)PE_parse_boot_argn("sweetfb_blmod", &v, sizeof(v));
++		sweet_fb_blmod = v != 0;
++	}
++	if (!sweet_fb_blmod) {
++		return true;
++	}
++	uint8_t cur = 0, got = 0;
++	if (sweet_spmi_read(SWEET_WLED_SID, SWEET_WLED_MOD_EN, &cur) != 0) {
++		return false;
++	}
++	uint8_t want = on ? (uint8_t)(cur | 0x80u) : (uint8_t)(cur & ~0x80u);
++	if (want != cur && sweet_spmi_write(SWEET_WLED_SID, SWEET_WLED_MOD_EN, &want, 1) != 0) {
++		return false;
++	}
++	bool ok = sweet_spmi_read(SWEET_WLED_SID, SWEET_WLED_MOD_EN, &got) == 0 && (got & 0x80u) == (want & 0x80u);
++	IOLog("SWEET FB: WLED module %s (MOD_EN 0x%02x -> 0x%02x)%s\n", on ? "on" : "off", cur, got, ok ? "" : " FAILED");
++	return ok;
++}
++
+ void
+ AppleCLCD::blInit(void)
+ {
+@@ -2607,6 +2639,8 @@ AppleCLCD::blSet(bool on)
+ 			fBlRaw[0] = now[0];     /* what the panel shows now is what "on" restores */
+ 			fBlRaw[1] = now[1];
+ 		}
++	} else {
++		(void)sweet_wled_module(true);  /* 0252: the module first, then the brightness */
+ 	}
+ 	for (int attempt = 0; attempt < 3; attempt++) {
+ 		bool ok = true;
+@@ -2627,6 +2661,9 @@ AppleCLCD::blSet(bool on)
+ 			fBlPos = on ? SWEET_FB_BL_STEPS : 0;
+ 			IOLog("SWEET FB: backlight %s (0x%04x/0x%04x)%s\n", on ? "on" : "off", want[0], want[1],
+ 			    attempt ? " after a retry" : "");
++			if (!on) {
++				(void)sweet_wled_module(false);   /* 0252: brightness 0 first, then the module off */
++			}
+ 			return true;
+ 		}
+ 		IODelay(200);
+@@ -3592,6 +3629,7 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
+ 				fFB->fDirty = true;     /* on: redraw the latest frame */
+ 			}
+ 			IOLockUnlock(fFB->fLock);
++			sweet_fb_screen_off = off;      /* 0252: read by tap-to-wake (SweetHID.cpp) */
+ 			IOLog("SWEET FB: display %s\n", off ? "off" : "on");
+ 		}
+ 		break;
+diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
+index f67b13f..ab9ff96 100644
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp
+@@ -646,9 +646,41 @@ sweet_hid_key(int key, int down)
+ 	}
+ }
+ 
++/*
++ * 0252 tap to wake (boot-arg sweettapwake=1): while iOS has the display off (SweetFramebuffer's power request sets
++ * sweet_fb_screen_off), the first touch-down is turned into a press and release of the side button and that touch is
++ * swallowed until every finger is up, so the waking tap never reaches the lock screen. Default off.
++ */
++extern "C" volatile int sweet_fb_screen_off;
++volatile int sweet_fb_screen_off = 0;
++
+ extern "C" void
+ sweet_hid_touch(int finger, int down, int x, int y)
+ {
++	static int tapwake = -1, swallow;
++
++	if (tapwake < 0) {
++		int v = 0;
++		(void)PE_parse_boot_argn("sweettapwake", &v, sizeof(v));
++		tapwake = v != 0;
++		IOLog("SWEET HID: sweettapwake=%d\n", tapwake);
++	}
++	if (tapwake) {
++		if (swallow) {
++			if (!down && finger == 0) {
++				swallow = 0;
++			}
++			return;
++		}
++		if (down && sweet_fb_screen_off) {
++			swallow = 1;
++			sweet_fb_screen_off = 0;        /* one press per tap, not one per touch report */
++			IOLog("SWEET HID: tap to wake\n");
++			sweet_hid_key(0, 1);
++			sweet_hid_key(0, 0);
++			return;
++		}
++	}
+ 	if (gSweetTouch) {
+ 		gSweetTouch->touch(finger, down != 0, x, y);
+ 	}
